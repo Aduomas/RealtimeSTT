@@ -1510,21 +1510,72 @@ class AudioToTextRecorder:
 
         return self
 
-    def stop(self):
+    def stop(self, backdate_stop_seconds=0, backdate_resume_seconds=0):
         """
         Stops recording audio.
+
+        Args:
+            backdate_stop_seconds (float): Seconds to backdate the stop time.
+            backdate_resume_seconds (float): Seconds to backdate the resume time.
         """
 
-        # Ensure there's a minimum interval
-        # between starting and stopping recording
-        if (time.time() - self.recording_start_time
-                < self.min_length_of_recording):
-            logging.info("Attempted to stop recording "
-                         "too soon after starting."
-                         )
+        # Ensure there's a minimum interval between starting and stopping recording
+        if time.time() - self.recording_start_time < self.min_length_of_recording:
+            logging.info("Attempted to stop recording too soon after starting.")
             return self
 
-        logging.info("recording stopped")
+        logging.info("Recording stopped")
+
+        # Adjust frames based on backdate_stop_seconds
+        if backdate_stop_seconds > 0:
+            total_samples_to_remove = int(backdate_stop_seconds * self.sample_rate)
+            bytes_to_remove = (
+                total_samples_to_remove * 2
+            )  # int16, so 2 bytes per sample
+            # Remove frames from the end
+            bytes_removed = 0
+            while bytes_to_remove > 0 and self.frames:
+                frame = self.frames.pop()
+                frame_len = len(frame)
+                if frame_len <= bytes_to_remove:
+                    bytes_removed += frame_len
+                    bytes_to_remove -= frame_len
+                else:
+                    # Put back the part of the frame we didn't remove
+                    remaining_frame = frame[: frame_len - bytes_to_remove]
+                    self.frames.append(remaining_frame)
+                    bytes_removed += bytes_to_remove
+                    bytes_to_remove = 0
+            logging.info(
+                f"Removed {bytes_removed / (2 * self.sample_rate):.2f} seconds from end of recording due to backdate_stop_seconds"
+            )
+
+        # Adjust frames for resume time (if applicable)
+        if backdate_resume_seconds > 0:
+            total_samples_to_restore = int(backdate_resume_seconds * self.sample_rate)
+            bytes_to_restore = total_samples_to_restore * 2  # int16
+            # Use buffered audio to restore frames
+            restored_bytes = 0
+            restored_frames = []
+            for frame in reversed(self.audio_buffer):
+                frame_len = len(frame)
+                if restored_bytes + frame_len <= bytes_to_restore:
+                    restored_frames.insert(0, frame)
+                    restored_bytes += frame_len
+                else:
+                    remaining_bytes = bytes_to_restore - restored_bytes
+                    if remaining_bytes > 0:
+                        restored_frames.insert(0, frame[-remaining_bytes:])
+                        restored_bytes += remaining_bytes
+                    break
+                if restored_bytes >= bytes_to_restore:
+                    break
+            # Add restored frames to the end
+            self.frames.extend(restored_frames)
+            logging.info(
+                f"Restored {restored_bytes / (2 * self.sample_rate):.2f} seconds to end of recording due to backdate_resume_seconds"
+            )
+
         self.is_recording = False
         self.recording_stop_time = time.time()
         self.is_silero_speech_active = False
